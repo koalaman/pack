@@ -1,0 +1,33 @@
+#!/bin/bash
+
+die() {
+  printf >&2 '%s\n' "$1"
+  exit 1
+}
+pack() { ./pack; }
+verify() {
+  cmp <(printf "$1") <(printf "$1" | ./pack | gzip -d) || die "Failed for $1"
+}
+
+repeat() {
+  while (( $# ))
+  do
+    for ((i=0; i<$1; i++))
+    do
+      printf '%s' "$2"
+    done
+    shift && shift
+  done
+}
+
+printf '\x1f\x1e\x00\x00\x00\x02\x02\x01\x00\x62\x61\x28' | gzip -d &> /dev/null ||
+    die "You're seem to be using gzip 1.6--1.8 which has pack related bugs. Please upgrade."
+pack < /dev/null > /dev/null || die "Can't run pack. Is it compiled and in the current dir?"
+
+verify "hello world"
+verify ""              # Original 'pack' would fail on empty files
+verify "aaaaaaaaaaa"   # Original 'pack' would fail for single bytes
+verify "$(printf "\\%o" {0..256})"
+verify "$(repeat 262144 s 131072 r 65536 q 32768 p 16384 o 8192 n 4096 m 2048 l 1024 k 512 j 256 i 128 h 64 g 32 f 16 e 8 d 4 c 2 b 1 a)"
+
+echo "Tests passed."
