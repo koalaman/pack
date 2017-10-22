@@ -6,7 +6,6 @@
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Map.Strict as M
 import Control.Monad
-import Data.Array.ST
 import Data.Word
 import Data.List
 import Data.Bits
