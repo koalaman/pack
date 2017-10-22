@@ -1,3 +1,8 @@
+{- Haskell implemention of pack, the early 80s file compression tool still
+ - supported by gzip.
+ - By Vidar 'koala_man' Holen, 2017
+ -}
+
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Map.Strict as M
 import Control.Monad
@@ -12,49 +17,55 @@ import System.Exit
 import Debug.Trace
 
 data Node = Branch Node Node | Leaf Word16
-    deriving (Show)
+    deriving (Show, Eq)
 
+-- Maximum number of bits we can use
+maxBits = 25
+
+-- special EOF value
 eof = 256
 
 countOccurrences :: B.ByteString -> M.Map Word8 Word32
-countOccurrences bs = B.foldl' (flip bump) M.empty bs
+countOccurrences = B.foldl' (flip bump) M.empty
   where
-    bump key map = M.insertWith (const (+1)) key 1 map
+    bump key = M.insertWith (const (+1)) key 1
 
--- Create a map from Count to Leaf nodes, with Char as disambiguator.
-invertCount :: M.Map Word8 Word32 -> M.Map (Word32,Word16) Node
-invertCount = M.fromList . map (\(k,v) -> ((v, fromIntegral k),Leaf (fromIntegral k))) . M.toList
-
--- pack explicitly encodes eof as a character
-insertEOF = M.insert (1, eof) (Leaf eof)
-
--- Repeatedly join the two smallest counts until we have a single Node.
-assembleTree :: M.Map (Word32,Word16) Node -> Node
-assembleTree mp =
-    case M.toList smallest of
-        [((count1,key1),node1), ((count2,key2),node2)] ->
-            assembleTree $ M.insert (count1+count2, key1) (Branch node1 node2) rest
-        [(_, node)] -> node
-        [] -> Leaf 0
-  where (smallest, rest) = M.splitAt 2 mp
-
--- Build a Huffman tree
-buildTree :: M.Map Word8 Word32 -> Node
-buildTree = assembleTree . insertEOF . invertCount . M.map (*2)
-
--- Make tree more compatible by guaranteeing 1 bit per symbol.
-tweakTree :: Node -> Node
-tweakTree t =
-    case t of
-        Branch {} -> t
-        Leaf w -> Branch t (Leaf 0)
-
--- Align a tree so that left side is deepest,
--- with eof right-most at the deepest level.
-alignTree :: Node -> Node
-alignTree tree = case mk levels of [single] -> single
+-- Naive implementation of Package-Merge to find a Huffman
+-- encoding with max tree depth constraints.
+packageMerge :: M.Map Word8 Word32 -> [[Word16]]
+packageMerge counts = flipLevels . countLeaves $ iterate maxBits []
   where
-    levels = map sort $ getLevels tree
+    getList :: M.Map Word8 Word32 -> [([Word16], Word64)]
+    getList m = ([eof], 1) :
+        if M.null m
+        then [([0x00], 2)] -- Ensure a minimum bitlength of 1
+        else (map (\(k,v) -> ([fromIntegral k], 2*(fromIntegral v))) $ M.toList m)
+    list = getList counts
+    sortList = sortOn snd
+    reduce l =
+        case l of
+            (t1, v1):(t2, v2):rest -> (t1 ++ t2, v1+v2) : reduce rest
+            [_] -> []
+            [] -> []
+    iterate 0 l = l
+    iterate n l =
+        let next = reduce $ sortList (l ++ list)
+        in if l == next then l else iterate (n-1) next
+    countLeaves :: [([Word16], Word64)] -> [(Word16, Int)]
+    countLeaves = map (\l -> (head l, length l)) . group . sort . concatMap fst
+
+    flipLevels :: [(Word16, Int)] -> [[Word16]]
+    flipLevels pairs = M.elems $ foldl' bump (M.fromList $ map (\x->(x,[])) [0..maxBits]) pairs
+    bump map (w16,level) = M.insertWith (++) level [w16] map
+
+-- Take a list of leaf nodes per level and build a Huffman tree
+-- where the longest path is leftmost.
+growTree :: [[Word16]] -> Node
+growTree levels =
+    case mk (map sort $ levels) of
+        [single] -> single
+        rest -> error $ (show levels) ++ ", " ++ (show rest)
+  where
     mk [last] = map Leaf last
     mk (level:rest) = collect (mk rest) ++ mk [level]
     collect [] = []
@@ -89,7 +100,7 @@ packBits str f = do
         Just (k,v) -> f v
     unless (B.null rest) $
         packBits rest f
-  where 
+  where
     (first, rest) = B.splitAt 8 str
     lookupTable = M.fromList $ generate 8 [] 0
     generate n prefix w =
@@ -108,7 +119,7 @@ w32ToByteString value =
 -- Return two IO actions for reading input from a handle.
 -- The first must be used and completely closed before using the other.
 duplicateInput :: Handle -> IO (IO B.ByteString, IO B.ByteString)
-duplicateInput input = do 
+duplicateInput input = do
     seekable <- hIsSeekable input
     if seekable
       then do
@@ -146,8 +157,9 @@ pack input output = do
     hSetBinaryMode input True
     (pass1, pass2) <- duplicateInput input
     counts <- countOccurrences <$> pass1
+    let tree = growTree $ packageMerge counts
+
     let size = sum $ M.elems counts
-    let tree = alignTree . tweakTree . buildTree $ counts
     tree `seq` size `seq` return ()
 
     let encoding = makeEncoding tree
@@ -178,6 +190,7 @@ pack input output = do
 
   where
     bPut = B.hPut output . B.singleton . fromIntegral
+
 
 main = do
     outputTTY <- hIsTerminalDevice stdout

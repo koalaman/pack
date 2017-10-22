@@ -4,5 +4,8 @@ pack: pack.hs
 test: pack dummy
 	./test
 
+clean:
+	rm -f pack.hi pack.o pack
+
 dummy:
 
